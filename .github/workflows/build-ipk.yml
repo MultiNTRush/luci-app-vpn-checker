@@ -13,7 +13,7 @@ jobs:
         # Укажите нужные архитектуры и версии OpenWrt
         include:
           - arch: aarch64_cortex-a53
-            target: mediatek/filogic
+            target: mediatek-filogic
 
     runs-on: ubuntu-latest
     container:
