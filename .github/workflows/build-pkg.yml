@@ -1,4 +1,4 @@
-name: Build OpenWrt IPK
+name: Build OpenWrt Packages (IPK & APK)
 
 on:
   push:
@@ -11,12 +11,21 @@ jobs:
     strategy:
       matrix:
         include:
+          # Сборка .ipk для OpenWrt 24.10
           - arch: x86_64
             target: x86-64
+            sdk_ver: 24.10.8
+            ext: ipk
+
+          # Сборка .apk для OpenWrt 25.12+
+          - arch: x86_64
+            target: x86-64
+            sdk_ver: 25.12.6
+            ext: apk
 
     runs-on: ubuntu-24.04
     container:
-      image: openwrt/sdk:${{ matrix.target }}-24.10.8
+      image: openwrt/sdk:${{ matrix.target }}-${{ matrix.sdk_ver }}
       options: --user root
 
     steps:
@@ -31,19 +40,19 @@ jobs:
           ./scripts/feeds install -a
           make defconfig
 
-      - name: Compile IPK
+      - name: Compile Package
         run: |
           cd /builder
           make package/luci-app-vpn-checker/compile V=s
 
-      - name: Upload IPK artifact
+      - name: Upload Package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: luci-app-vpn-checker-${{ matrix.arch }}
-          path: /builder/bin/packages/*/base/luci-app-vpn-checker_*.ipk
+          name: luci-app-vpn-checker-${{ matrix.arch }}-${{ matrix.ext }}
+          path: /builder/bin/packages/*/base/luci-app-vpn-checker*.${{ matrix.ext }}
 
-      - name: Upload IPK to Release
+      - name: Upload Package to Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: /builder/bin/packages/*/base/luci-app-vpn-checker_*.ipk
+          files: /builder/bin/packages/*/base/luci-app-vpn-checker*.${{ matrix.ext }}
