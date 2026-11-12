@@ -1,0 +1,54 @@
+{
+	"luci-app-vpn-checker": {
+		"description": "Grant access to VPN-Checker",
+		"read": {
+			"ubus": {
+				"luci.vpn-checker": [
+					"get_groups",
+					"get_group",
+					"get_binary_status",
+					"get_service_status",
+					"get_compat",
+					"get_cpu_load",
+					"get_stats",
+					"get_log",
+					"check_url_available"
+				]
+			},
+			"uci": [
+				"vpn-checker"
+			],
+			"file": {
+				"/usr/share/vpn-checker/xray-knife": [ "read" ],
+				"/tmp/vpn-checker/vpn-checker.log": [ "read" ],
+				"/tmp/vpn-checker/download.log": [ "read" ],
+				"/tmp/vpn-checker/service.log": [ "read" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"luci.vpn-checker": [
+					"save_group",
+					"delete_group",
+					"check_binary_update",
+					"remove_binary",
+					"download_binary",
+					"service_action",
+					"clear_log",
+					"toggle_group",
+					"force_check",
+					"force_check_all",
+					"import_config"
+				]
+			},
+			"uci": [
+				"vpn-checker"
+			],
+			"file": {
+				"/etc/init.d/vpn-checker": [ "exec" ],
+				"/usr/share/vpn-checker/xray-knife": [ "write" ],
+				"/tmp/vpn-checker/vpn-checker.log": [ "write" ]
+			}
+		}
+	}
+}

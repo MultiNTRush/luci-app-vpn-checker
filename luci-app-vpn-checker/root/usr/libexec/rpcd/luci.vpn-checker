@@ -1,0 +1,1019 @@
+#!/bin/sh
+
+. /usr/share/libubox/jshn.sh
+. /lib/functions.sh
+
+SUBS_LIST=""
+URLS_LIST=""
+
+append_sub() { SUBS_LIST="${SUBS_LIST}${1}
+"; }
+append_url() { URLS_LIST="${URLS_LIST}${1}
+"; }
+
+KNIFE_MIN_VERSION="1.6.0"
+STATE_DIR="/tmp/vpn-checker"
+WWW_DIR="/www/vpn-checker"
+BIN_PATH="/usr/share/vpn-checker/xray-knife"
+GITHUB_REPO="lilendian0x00/xray-knife"
+LOG_FILE="$STATE_DIR/vpn-checker.log"
+LOG_FILE_1="$STATE_DIR/vpn-checker.log.1"
+
+read_group() {
+	local cfg="$1"
+	local name enabled speedtest threads accuracy interval_value interval_unit
+	config_get name "$cfg" name ""
+	config_get_bool enabled "$cfg" enabled 1
+	config_get_bool speedtest "$cfg" speedtest 0
+	config_get threads "$cfg" threads 10
+	config_get accuracy "$cfg" accuracy 0.75
+	config_get interval_value "$cfg" interval_value 60
+	config_get interval_unit "$cfg" interval_unit "m"
+
+	SUBS_LIST=""
+	URLS_LIST=""
+	config_list_foreach "$cfg" subscriptions append_sub
+	config_list_foreach "$cfg" check_urls append_url
+
+	json_add_object "$cfg"
+	json_add_string name "$name"
+	json_add_boolean enabled "$enabled"
+	json_add_boolean speedtest "$speedtest"
+	json_add_int threads "$threads"
+	json_add_string accuracy "$accuracy"
+	json_add_int interval_value "$interval_value"
+	json_add_string interval_unit "$interval_unit"
+
+	json_add_array subscriptions
+	local s
+	OLDIFS="$IFS"; IFS="
+"
+	for s in $SUBS_LIST; do [ -n "$s" ] && json_add_string "" "$s"; done
+	IFS="$OLDIFS"
+	json_close_array
+
+	json_add_array check_urls
+	local u
+	OLDIFS="$IFS"; IFS="
+"
+	for u in $URLS_LIST; do [ -n "$u" ] && json_add_string "" "$u"; done
+	IFS="$OLDIFS"
+	json_close_array
+
+	json_close_object
+}
+
+do_get_groups() {
+	json_init
+	json_add_object "groups"
+	config_load vpn-checker
+	config_foreach read_group group
+	json_close_object
+	json_dump
+}
+
+do_get_group() {
+	local cfg="$1"
+	[ -n "$cfg" ] || { echo '{}'; return; }
+	json_init
+	config_load vpn-checker
+	if [ "$(uci -q get vpn-checker.$cfg)" != "group" ]; then
+		json_add_string error "Group not found"; json_dump; return
+	fi
+	read_group "$cfg"
+	json_dump
+}
+
+do_save_group() {
+	local raw="$1"
+	[ -n "$raw" ] || { echo '{"error":"empty payload"}'; return; }
+
+	local base="$raw"
+	local inner
+	inner=$(echo "$raw" | jsonfilter -e '@.payload' 2>/dev/null)
+	if [ -n "$inner" ] && [ "$inner" != "null" ]; then
+		if echo "$inner" | grep -q '^\s*{'; then
+			base="$inner"
+		else
+			local unq
+			unq=$(echo "$raw" | jsonfilter -t -e '@.payload' 2>/dev/null)
+			[ -n "$unq" ] && base="$unq"
+		fi
+	fi
+
+	local cfg name enabled speedtest threads accuracy interval_value interval_unit
+	cfg=$(echo "$base" | jsonfilter -e '@.cfg' 2>/dev/null)
+	name=$(echo "$base" | jsonfilter -e '@.name' 2>/dev/null)
+	enabled=$(echo "$base" | jsonfilter -e '@.enabled' 2>/dev/null)
+	speedtest=$(echo "$base" | jsonfilter -e '@.speedtest' 2>/dev/null)
+	threads=$(echo "$base" | jsonfilter -e '@.threads' 2>/dev/null)
+	accuracy=$(echo "$base" | jsonfilter -e '@.accuracy' 2>/dev/null)
+	interval_value=$(echo "$base" | jsonfilter -e '@.interval_value' 2>/dev/null)
+	interval_unit=$(echo "$base" | jsonfilter -e '@.interval_unit' 2>/dev/null)
+
+	local subs_txt urls_txt
+	subs_txt=$(echo "$base" | jsonfilter -e '@.subscriptions[*]' 2>/dev/null)
+	urls_txt=$(echo "$base" | jsonfilter -e '@.check_urls[*]' 2>/dev/null)
+
+	if [ -z "$cfg" ]; then
+		cfg=$(echo "$name" | tr -cs 'a-zA-Z0-9_' '_' | sed 's/^_//;s/_$//')
+		[ -n "$cfg" ] || cfg="grp_$(date +%s)"
+		uci set vpn-checker.$cfg=group
+	fi
+
+	[ -n "$name" ] && uci set vpn-checker.$cfg.name="$name"
+	uci set vpn-checker.$cfg.enabled="${enabled:-0}"
+	uci set vpn-checker.$cfg.speedtest="${speedtest:-0}"
+	uci set vpn-checker.$cfg.threads="${threads:-10}"
+	uci set vpn-checker.$cfg.accuracy="${accuracy:-0.75}"
+	uci set vpn-checker.$cfg.interval_value="${interval_value:-60}"
+	uci set vpn-checker.$cfg.interval_unit="${interval_unit:-m}"
+
+	uci -q delete vpn-checker.$cfg.subscriptions
+	OLDIFS="$IFS"; IFS="
+"
+	for item in $subs_txt; do
+		[ -n "$item" ] && uci add_list vpn-checker.$cfg.subscriptions="$item"
+	done
+	IFS="$OLDIFS"
+
+	uci -q delete vpn-checker.$cfg.check_urls
+	OLDIFS="$IFS"; IFS="
+"
+	for item in $urls_txt; do
+		[ -n "$item" ] && uci add_list vpn-checker.$cfg.check_urls="$item"
+	done
+	IFS="$OLDIFS"
+
+	uci commit vpn-checker
+
+	json_init
+	json_add_string cfg "$cfg"
+	json_add_string name "$name"
+	json_add_string status "ok"
+	json_dump
+}
+
+do_delete_group() {
+	local cfg="$1"
+	[ -n "$cfg" ] || { echo '{"error":"missing cfg"}'; return; }
+	uci -q delete vpn-checker.$cfg
+	uci commit vpn-checker
+	rm -f "$STATE_DIR/next_run_$cfg" \
+	      "$STATE_DIR/force_$cfg" \
+	      "$STATE_DIR/running_$cfg" \
+	      "$STATE_DIR/configs_$cfg.txt" \
+	      "$STATE_DIR/subs_ok_$cfg.txt" \
+	      "$STATE_DIR/knife_out_$cfg.log" \
+	      "$STATE_DIR/history_$cfg.log"
+	json_init; json_add_string status "ok"; json_dump
+}
+
+do_get_binary_status() {
+	json_init
+	if [ -x "$BIN_PATH" ]; then
+		json_add_boolean installed 1
+		local ver
+		ver=$("$BIN_PATH" --version 2>/dev/null | head -n1)
+		[ -z "$ver" ] && ver=$("$BIN_PATH" -v 2>/dev/null | head -n1)
+		json_add_string version "${ver:-unknown}"
+		json_add_string path "$BIN_PATH"
+	else
+		json_add_boolean installed 0
+		json_add_string version ""
+		json_add_string path "$BIN_PATH"
+	fi
+	local arch
+	arch=$(uname -m)
+	json_add_string arch "$arch"
+
+	local cache="$STATE_DIR/latest_version.json"
+	local latest=""
+	local latest_checked=0
+	if [ -f "$cache" ]; then
+		local cache_age
+		cache_age=$(( $(date +%s) - $(date -r "$cache" +%s 2>/dev/null || echo 0) ))
+		if [ "$cache_age" -lt 21600 ]; then
+			latest=$(jsonfilter -i "$cache" -e '@.tag_name' 2>/dev/null)
+			latest_checked=$(jsonfilter -i "$cache" -e '@.checked' 2>/dev/null)
+		fi
+	fi
+
+	json_add_string latest_version "${latest:-}"
+	json_add_int latest_checked "${latest_checked:-0}"
+	json_add_string min_version "$KNIFE_MIN_VERSION"
+	json_dump
+}
+
+do_check_binary_update() {
+	local cache="$STATE_DIR/latest_version.json"
+	mkdir -p "$STATE_DIR"
+
+	local url="https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+	local body
+	body=$(wget -q -O - \
+		--user-agent="vpn-checker" \
+		--timeout=15 \
+		--tries=1 \
+		"$url" 2>/dev/null)
+
+	if [ -z "$body" ]; then
+		json_init
+		json_add_string status "error"
+		json_add_string error "github_unreachable"
+		json_dump
+		return
+	fi
+
+	local tag
+	tag=$(echo "$body" | jsonfilter -e '@.tag_name' 2>/dev/null)
+	[ -z "$tag" ] && tag=$(echo "$body" | jsonfilter -e '@.name' 2>/dev/null)
+	[ -z "$tag" ] && tag="unknown"
+
+	local now
+	now=$(date +%s)
+	printf '{"tag_name":"%s","checked":%s}' "$tag" "$now" > "$cache"
+
+	json_init
+	json_add_string status "ok"
+	json_add_string tag_name "$tag"
+	json_add_int checked "$now"
+	json_dump
+}
+
+do_remove_binary() {
+	if [ -f "$BIN_PATH" ]; then
+		rm -f "$BIN_PATH"
+		json_init
+		json_add_string status "ok"
+		json_add_string path "$BIN_PATH"
+		json_dump
+	else
+		json_init
+		json_add_string status "ok"
+		json_add_string message "already_absent"
+		json_dump
+	fi
+}
+
+do_download_binary() {
+	local LOG="$STATE_DIR/download.log"
+	mkdir -p "$STATE_DIR"
+
+	if find_knife_pid >/dev/null 2>&1; then
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] refusing update: xray-knife is running" >> "$LOG"
+		json_init
+		json_add_string status "error"
+		json_add_string error "knife_running"
+		json_dump
+		return
+	fi
+
+	local arch
+	arch=$(uname -m)
+	local asset
+	case "$arch" in
+		aarch64|arm64) asset="Xray-knife-linux-arm64-v8a.zip" ;;
+		x86_64|amd64)  asset="Xray-knife-linux-64.zip" ;;
+		armv7l)        asset="Xray-knife-linux-arm.zip" ;;
+		*) echo "[$(date)] Unsupported arch: $arch" >> "$LOG"; echo '{"error":"unsupported arch"}'; return ;;
+	esac
+
+	local url="https://github.com/lilendian0x00/xray-knife/releases/latest/download/$asset"
+
+	local tmpdir=""
+	local cand
+	for cand in /overlay/vpn-checker-dl /root/vpn-checker-dl /tmp/vpn-checker-dl; do
+		local parent
+		parent=$(dirname "$cand")
+		[ -d "$parent" ] || continue
+		local avail_kb
+		avail_kb=$(df -k "$parent" 2>/dev/null | awk 'NR==2 {print $4}')
+		if [ -n "$avail_kb" ] && [ "$avail_kb" -gt 65536 ]; then
+			tmpdir="$cand"
+			break
+		fi
+	done
+	[ -z "$tmpdir" ] && tmpdir="/tmp/vpn-checker-dl"
+
+	rm -rf "$tmpdir"
+	mkdir -p "$tmpdir" || { echo '{"error":"no space for tmpdir"}'; return; }
+
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] tmpdir=$tmpdir, downloading $url" >> "$LOG"
+	if ! wget -q -O "$tmpdir/$asset" "$url" >> "$LOG" 2>&1; then
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] wget failed" >> "$LOG"
+		rm -rf "$tmpdir"
+		echo '{"error":"download failed"}'
+		return
+	fi
+
+	local zip_size
+	zip_size=$(wc -c < "$tmpdir/$asset" 2>/dev/null)
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] downloaded $zip_size bytes" >> "$LOG"
+
+	if [ -f "$BIN_PATH" ]; then
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] removing old $BIN_PATH" >> "$LOG"
+		rm -f "$BIN_PATH"
+	fi
+
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] unpacking into $tmpdir" >> "$LOG"
+	if ! unzip -o -q "$tmpdir/$asset" -d "$tmpdir" >> "$LOG" 2>&1; then
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] unzip failed" >> "$LOG"
+		rm -rf "$tmpdir"
+		echo '{"error":"unzip failed"}'
+		return
+	fi
+
+	rm -f "$tmpdir/$asset"
+
+	local found
+	found=$(find "$tmpdir" -type f -name "xray-knife" | head -n1)
+	if [ -z "$found" ]; then
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] binary not found in archive" >> "$LOG"
+		rm -rf "$tmpdir"
+		echo '{"error":"binary not found"}'
+		return
+	fi
+
+	mkdir -p /usr/share/vpn-checker
+
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] installing to $BIN_PATH" >> "$LOG"
+	if ! mv "$found" "$BIN_PATH" >> "$LOG" 2>&1; then
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] mv to $BIN_PATH failed" >> "$LOG"
+		rm -rf "$tmpdir"
+		echo '{"error":"install failed"}'
+		return
+	fi
+	chmod 755 "$BIN_PATH"
+
+	rm -rf "$tmpdir"
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] tmpdir cleaned" >> "$LOG"
+
+	rm -f "$STATE_DIR/latest_version.json"
+
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] Installed to $BIN_PATH" >> "$LOG"
+	json_init
+	json_add_string status "ok"
+	json_add_string path "$BIN_PATH"
+	json_dump
+}
+
+do_service_action() {
+	local action="$1"
+	case "$action" in
+		start|stop|restart)
+			/etc/init.d/vpn-checker "$action" >> "$STATE_DIR/service.log" 2>&1
+			local rc=$?
+			json_init
+			if [ "$rc" -eq 0 ]; then
+				json_add_string status "ok"
+			else
+				json_add_string status "error"
+				json_add_int code "$rc"
+			fi
+			json_add_string action "$action"
+			json_dump
+		;;
+		*) echo '{"error":"invalid action"}' ;;
+	esac
+}
+
+do_get_service_status() {
+	json_init
+	local status="stopped"
+	local pid=""
+	local uptime=0
+	local restarts_recent=0
+
+	local ubus_out
+	ubus_out=$(ubus call service list '{"name":"vpn-checker","verbose":true}' 2>/dev/null)
+	if [ -n "$ubus_out" ]; then
+		local running
+		running=$(echo "$ubus_out" | jsonfilter -e '@["vpn-checker"].instances[*].running' 2>/dev/null | head -n1)
+		if [ "$running" = "true" ]; then
+			status="running"
+			pid=$(echo "$ubus_out" | jsonfilter -e '@["vpn-checker"].instances[*].pid' 2>/dev/null | head -n1)
+			if [ -n "$pid" ] && [ -f "/proc/$pid/stat" ]; then
+				local starttime clk_tck boot_sec
+				starttime=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)
+				clk_tck=$(getconf CLK_TCK 2>/dev/null || echo 100)
+				boot_sec=$(awk '/^btime/ {print $2}' /proc/stat 2>/dev/null)
+				if [ -n "$starttime" ] && [ -n "$boot_sec" ]; then
+					local proc_start_epoch=$(( boot_sec + starttime / clk_tck ))
+					local now_epoch=$(date +%s)
+					uptime=$(( now_epoch - proc_start_epoch ))
+					[ "$uptime" -lt 0 ] && uptime=0
+				fi
+			fi
+			restarts_recent=$(logread 2>/dev/null | grep -c "vpn-checker.*exited" || echo 0)
+		fi
+	fi
+
+	json_add_string status "$status"
+	json_add_string pid "$pid"
+	json_add_int uptime "$uptime"
+	json_add_int restarts_recent "$restarts_recent"
+	json_dump
+}
+
+read_cpu_temperature() {
+	local t=""
+	local z temp
+	for z in /sys/class/thermal/thermal_zone*; do
+		[ -r "$z/temp" ] || continue
+		temp=$(cat "$z/temp" 2>/dev/null)
+		case "$temp" in ''|*[!0-9-]*) continue ;; esac
+		if [ "${#temp}" -gt 3 ] || [ "$temp" -gt 200 ]; then
+			temp=$(( temp / 1000 ))
+		fi
+		if [ "$temp" -gt -40 ] && [ "$temp" -lt 150 ]; then
+			t="$temp"
+			break
+		fi
+	done
+	if [ -z "$t" ]; then
+		local h
+		for h in /sys/class/hwmon/hwmon*; do
+			[ -r "$h/temp1_input" ] || continue
+			temp=$(cat "$h/temp1_input" 2>/dev/null)
+			case "$temp" in ''|*[!0-9-]*) continue ;; esac
+			if [ "${#temp}" -gt 3 ] || [ "$temp" -gt 200 ]; then
+				temp=$(( temp / 1000 ))
+			fi
+			if [ "$temp" -gt -40 ] && [ "$temp" -lt 150 ]; then
+				t="$temp"
+				break
+			fi
+		done
+	fi
+	echo "$t"
+}
+
+find_knife_pid() {
+	local bin_name="xray-knife"
+	local p cmd comm
+	for p in $(pgrep -x "$bin_name" 2>/dev/null); do
+		cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
+		case "$cmd" in
+			*"$BIN_PATH"*) echo "$p"; return 0 ;;
+		esac
+	done
+	for p in $(pgrep -f "$BIN_PATH" 2>/dev/null); do
+		comm=$(cat "/proc/$p/comm" 2>/dev/null)
+		[ "$comm" = "timeout" ] && continue
+		echo "$p"; return 0
+	done
+	return 1
+}
+
+read_process_cpu_rss() {
+	local nproc="${1:-1}"
+	[ -z "$nproc" ] || [ "$nproc" -lt 1 ] 2>/dev/null && nproc=1
+
+	local pid
+	pid=$(find_knife_pid 2>/dev/null)
+	[ -z "$pid" ] && return 1
+
+	local stat_file="/proc/$pid/stat"
+	[ -f "$stat_file" ] || return 1
+
+	local utime stime clk_tck now_ms
+	utime=$(awk '{print $14}' "$stat_file" 2>/dev/null)
+	stime=$(awk '{print $15}' "$stat_file" 2>/dev/null)
+	clk_tck=$(getconf CLK_TCK 2>/dev/null || echo 100)
+	[ -z "$utime" ] && return 1
+	[ -z "$stime" ] && return 1
+
+	local ticks=$(( utime + stime ))
+
+	now_ms=$(date +%s%3N 2>/dev/null)
+	case "$now_ms" in
+		*N*|'') now_ms=$(( $(date +%s) * 1000 )) ;;
+	esac
+
+	local cache="$STATE_DIR/proc_cache"
+	local prev_pid="" prev_ticks=0 prev_ms=0
+	if [ -f "$cache" ]; then
+		read -r prev_pid prev_ticks prev_ms < "$cache" 2>/dev/null
+	fi
+
+	local cpu=0
+	if [ "$prev_pid" = "$pid" ] && [ "$prev_ms" -gt 0 ] 2>/dev/null; then
+		local dt_ms=$(( now_ms - prev_ms ))
+		local dt_ticks=$(( ticks - prev_ticks ))
+		if [ "$dt_ms" -gt 0 ] && [ "$dt_ticks" -ge 0 ]; then
+			cpu=$(awk -v dt="$dt_ticks" -v ms="$dt_ms" -v hz="$clk_tck" -v n="$nproc" \
+				'BEGIN { v = (dt * 100000) / (ms * hz * n); if (v < 0) v = 0; if (v > 100) v = 100; printf "%d", v + 0.5 }')
+		fi
+	fi
+	printf '%s %s %s\n' "$pid" "$ticks" "$now_ms" > "$cache"
+
+	local rss=0
+	local rss_pages
+	rss_pages=$(awk '/^VmRSS:/ {print $2}' "/proc/$pid/status" 2>/dev/null)
+	[ -n "$rss_pages" ] && rss=$(( rss_pages * 1024 ))
+
+	echo "$cpu $rss"
+	return 0
+}
+
+read_storage() {
+	local path="/"
+	[ -d /overlay ] && path="/overlay"
+	local line
+	line=$(df -k "$path" 2>/dev/null | awk 'NR==2 {print $2" "$3" "$4}')
+	if [ -z "$line" ]; then
+		echo "0 0 0"
+		return
+	fi
+	local t u a
+	t=$(echo "$line" | awk '{print $1}')
+	u=$(echo "$line" | awk '{print $2}')
+	a=$(echo "$line" | awk '{print $3}')
+	echo "$(( t * 1024 )) $(( u * 1024 )) $(( a * 1024 ))"
+}
+
+read_script_storage() {
+	local total=0
+	local d s bs
+	for d in "$STATE_DIR" "$WWW_DIR"; do
+		[ -d "$d" ] || continue
+		s=$(du -sk "$d" 2>/dev/null | awk '{print $1}')
+		[ -n "$s" ] && total=$(( total + s * 1024 ))
+	done
+	if [ -f "$BIN_PATH" ]; then
+		bs=$(wc -c < "$BIN_PATH" 2>/dev/null)
+		[ -n "$bs" ] && total=$(( total + bs ))
+	fi
+	echo "$total"
+}
+
+do_get_cpu_load() {
+	local load_avg
+	load_avg=$(cut -d' ' -f1 /proc/loadavg)
+	local nproc
+	nproc=$(nproc 2>/dev/null)
+	[ -z "$nproc" ] && nproc=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null)
+	if [ -z "$nproc" ] || [ "$nproc" -lt 1 ] 2>/dev/null; then nproc=1; fi
+
+	local loadavg_percent=0
+	if [ -n "$load_avg" ] && [ "$nproc" -gt 0 ] 2>/dev/null; then
+		loadavg_percent=$(awk -v l="$load_avg" -v n="$nproc" 'BEGIN { printf "%d", (l*100/n)+0.5 }')
+	fi
+
+	local cache="$STATE_DIR/cpu_cache"
+	local prev_total prev_idle
+	if [ -f "$cache" ]; then
+		prev_total=$(cut -d' ' -f1 "$cache")
+		prev_idle=$(cut -d' ' -f2 "$cache")
+	fi
+
+	local cpu_line total idle
+	cpu_line=$(grep '^cpu ' /proc/stat)
+	total=$(echo "$cpu_line" | awk '{sum=0; for(i=2;i<=NF;i++) sum+=$i; print sum}')
+	idle=$(echo "$cpu_line" | awk '{print $5}')
+
+	local load=0
+	if [ -n "$prev_total" ] && [ -n "$prev_idle" ] && [ "$total" -gt "$prev_total" ]; then
+		local dt=$(( total - prev_total ))
+		local di=$(( idle - prev_idle ))
+		load=$(( (dt - di) * 100 / dt ))
+	fi
+	echo "$total $idle" > "$cache"
+
+	local proc_cpu=0
+	local proc_rss=0
+	local pc
+	pc=$(read_process_cpu_rss "$nproc" 2>/dev/null)
+	if [ -n "$pc" ]; then
+		proc_cpu=$(echo "$pc" | awk '{print $1}')
+		proc_rss=$(echo "$pc" | awk '{print $2}')
+		[ -z "$proc_cpu" ] && proc_cpu=0
+		[ -z "$proc_rss" ] && proc_rss=0
+	fi
+
+	local mem_total mem_available mem_used
+	mem_total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)
+	mem_available=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)
+	[ -z "$mem_available" ] && mem_available=$(awk '/^MemFree:/ {print $2}' /proc/meminfo 2>/dev/null)
+	mem_total=${mem_total:-0}
+	mem_available=${mem_available:-0}
+	mem_used=$(( mem_total - mem_available ))
+
+	local temp
+	temp=$(read_cpu_temperature)
+
+	local st_total st_used st_avail
+	st_total=0; st_used=0; st_avail=0
+	read -r st_total st_used st_avail <<EOF
+$(read_storage)
+EOF
+
+	local script_storage
+	script_storage=$(read_script_storage)
+
+	json_init
+	json_add_int system_load "$load"
+	json_add_int process_load "$proc_cpu"
+	json_add_string loadavg "$load_avg"
+	json_add_int loadavg_percent "$loadavg_percent"
+	json_add_int cpu_cores "$nproc"
+	json_add_int temperature "${temp:-0}"
+
+	json_add_object "memory"
+	json_add_int total $(( mem_total * 1024 ))
+	json_add_int used $(( mem_used * 1024 ))
+	json_add_int available $(( mem_available * 1024 ))
+	json_close_object
+
+	json_add_object "process_memory"
+	json_add_int rss "$proc_rss"
+	json_close_object
+
+	json_add_object "storage"
+	json_add_int total "$st_total"
+	json_add_int used "$st_used"
+	json_add_int available "$st_avail"
+	json_close_object
+
+	json_add_object "process_storage"
+	json_add_int used "$script_storage"
+	json_close_object
+
+	json_dump
+}
+
+do_get_compat() {
+	json_init
+	json_add_boolean installed 0
+	json_add_boolean outdated 0
+	json_add_string local_version ""
+
+	if [ ! -x "$BIN_PATH" ]; then
+		json_add_object "protocols"
+		json_close_object
+		json_dump
+		return
+	fi
+
+	json_add_boolean installed 1
+
+	local ver_raw ver
+	ver_raw=$("$BIN_PATH" --version 2>/dev/null | head -n1)
+	[ -z "$ver_raw" ] && ver_raw=$("$BIN_PATH" -v 2>/dev/null | head -n1)
+	ver=$(echo "$ver_raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+	json_add_string local_version "${ver:-unknown}"
+
+	local outdated=0
+	if [ -n "$ver" ]; then
+		local need=$KNIFE_MIN_VERSION
+		local v_major=${ver%%.*}
+		local v_rest=${ver#*.}
+		local v_minor=${v_rest%%.*}
+		local v_patch=${v_rest#*.}
+		local n_major=${need%%.*}
+		local n_rest=${need#*.}
+		local n_minor=${n_rest%%.*}
+		local n_patch=${n_rest#*.}
+		if [ "$v_major" -lt "$n_major" ] 2>/dev/null; then
+			outdated=1
+		elif [ "$v_major" -eq "$n_major" ] 2>/dev/null && [ "$v_minor" -lt "$n_minor" ] 2>/dev/null; then
+			outdated=1
+		elif [ "$v_major" -eq "$n_major" ] 2>/dev/null && [ "$v_minor" -eq "$n_minor" ] 2>/dev/null && [ "$v_patch" -lt "$n_patch" ] 2>/dev/null; then
+			outdated=1
+		fi
+	fi
+	json_add_boolean outdated "$outdated"
+
+	json_add_object "protocols"
+	local cfg
+	config_load vpn-checker
+	for cfg in $(uci show vpn-checker 2>/dev/null | grep '=group$' | cut -d. -f2 | cut -d= -f1); do
+		local configs="$STATE_DIR/configs_$cfg.txt"
+		[ -f "$configs" ] || continue
+		local p
+		for p in $(grep -oE '^(vless|vmess|trojan|ss|ssr|hysteria2|hysteria|tuic|wireguard|socks|http)://' "$configs" 2>/dev/null | sed 's|://||' | sort -u); do
+			json_add_boolean "$p" 1
+		done
+	done
+	json_close_object
+
+	json_dump
+}
+
+do_get_stats() {
+	json_init
+	json_add_object "groups"
+
+	local lan_ip=""
+	local net_status
+	net_status=$(ubus call network.interface.lan status 2>/dev/null)
+	if [ -n "$net_status" ]; then
+		lan_ip=$(echo "$net_status" | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null)
+	fi
+	[ -z "$lan_ip" ] && lan_ip=$(uci -q get network.lan.ipaddr)
+	[ -z "$lan_ip" ] && lan_ip="192.168.1.1"
+
+	local cfg name file available mtime url total running
+	local subs_total subs_available
+	for cfg in $(uci show vpn-checker 2>/dev/null | grep '=group$' | cut -d. -f2 | cut -d= -f1); do
+		name=$(uci -q get vpn-checker.$cfg.name)
+		[ -z "$name" ] && name="$cfg"
+		file="$WWW_DIR/sub_$cfg.txt"
+		available=0; mtime=""; url=""; total=0
+		if [ -f "$file" ]; then
+			available=$(grep -c . "$file" 2>/dev/null)
+			[ -z "$available" ] && available=0
+			mtime=$(date -r "$file" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
+			url="http://$lan_ip/vpn-checker/sub_$cfg.txt"
+		fi
+		local configs="$STATE_DIR/configs_$cfg.txt"
+		if [ -f "$configs" ]; then
+			total=$(grep -cE '^(vless|vmess|trojan|ss|ssr|hysteria2|hysteria|tuic|wireguard|socks|http)://' "$configs" 2>/dev/null)
+			[ -z "$total" ] && total=0
+		fi
+		running=0
+		[ -f "$STATE_DIR/running_$cfg" ] && running=1
+
+		subs_total=0
+		SUBS_LIST=""
+		config_load vpn-checker
+		config_list_foreach "$cfg" subscriptions append_sub
+		OLDIFS="$IFS"; IFS="
+"
+		for s in $SUBS_LIST; do [ -n "$s" ] && subs_total=$((subs_total + 1)); done
+		IFS="$OLDIFS"
+
+		subs_available=0
+		local ok_file="$STATE_DIR/subs_ok_$cfg.txt"
+		if [ -f "$ok_file" ]; then
+			subs_available=$(grep -c . "$ok_file" 2>/dev/null)
+			[ -z "$subs_available" ] && subs_available=0
+		fi
+
+		json_add_object "$cfg"
+		json_add_string name "$name"
+		json_add_int available "$available"
+		json_add_int total "$total"
+		json_add_int running "$running"
+		json_add_string mtime "$mtime"
+		json_add_string url "$url"
+		json_add_int subs_total "$subs_total"
+		json_add_int subs_available "$subs_available"
+		json_close_object
+	done
+	json_close_object
+	json_dump
+}
+
+do_get_log() {
+	local lines="${1:-500}"
+	local which="${2:-current}"
+	case "$lines" in
+		500|1000|2000|5000) ;;
+		*) lines=500 ;;
+	esac
+
+	local file="$LOG_FILE"
+	local label="current"
+	if [ "$which" = "prev" ]; then
+		file="$LOG_FILE_1"
+		label="prev"
+	fi
+
+	json_init
+	if [ -f "$file" ]; then
+		json_add_string content "$(tail -n "$lines" "$file" 2>/dev/null)"
+		json_add_int size "$(wc -c < "$file" 2>/dev/null)"
+		json_add_int lines "$lines"
+		json_add_string file "$label"
+	else
+		json_add_string content ""
+		json_add_int size 0
+		json_add_int lines "$lines"
+		json_add_string file "$label"
+	fi
+	json_add_boolean has_prev "$([ -f "$LOG_FILE_1" ] && echo 1 || echo 0)"
+	json_dump
+}
+
+do_clear_log() {
+	rm -f "$LOG_FILE" 2>/dev/null
+	json_init; json_add_string status "ok"; json_dump
+}
+
+do_toggle_group() {
+	local cfg="$1" enabled="$2"
+	[ -n "$cfg" ] || { echo '{"error":"missing cfg"}'; return; }
+	[ "$enabled" = "1" ] || enabled="0"
+	uci set vpn-checker.$cfg.enabled="$enabled"
+	uci commit vpn-checker
+	json_init
+	json_add_string status "ok"
+	json_add_string cfg "$cfg"
+	json_add_string enabled "$enabled"
+	json_dump
+}
+
+do_force_check() {
+	local cfg="$1"
+	[ -n "$cfg" ] || { echo '{"error":"missing cfg"}'; return; }
+	mkdir -p "$STATE_DIR"
+	touch "$STATE_DIR/force_$cfg"
+	json_init
+	json_add_string status "ok"
+	json_add_string cfg "$cfg"
+	json_dump
+}
+
+do_force_check_all() {
+	mkdir -p "$STATE_DIR"
+	local cfg count=0
+	for cfg in $(uci show vpn-checker 2>/dev/null | grep '=group$' | cut -d. -f2 | cut -d= -f1); do
+		local enabled
+		enabled=$(uci -q get vpn-checker.$cfg.enabled)
+		[ "$enabled" = "1" ] || continue
+		touch "$STATE_DIR/force_$cfg"
+		count=$((count + 1))
+	done
+	json_init
+	json_add_string status "ok"
+	json_add_int triggered "$count"
+	json_dump
+}
+
+do_import_config() {
+	local content="$1"
+	[ -n "$content" ] || { echo '{"error":"empty"}'; return; }
+
+	local imported=0
+	local current=""
+	local line key val lkey lval
+	OLDIFS="$IFS"; IFS="
+"
+	for line in $content; do
+		IFS="$OLDIFS"
+		line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+		[ -z "$line" ] && { IFS="
+"; continue; }
+		case "$line" in
+			config\ group\ *)
+				current=$(echo "$line" | sed "s/^config group ['\"]\{0,1\}\([^'\"]*\)['\"]\{0,1\}.*/\1/")
+				[ -n "$current" ] && imported=$((imported + 1))
+			;;
+			option\ *)
+				[ -z "$current" ] && { IFS="
+"; continue; }
+				key=$(echo "$line" | sed "s/^option \([a-z_]*\).*/\1/")
+				val=$(echo "$line" | sed "s/^option [a-z_]* ['\"]\{0,1\}\(.*\)['\"]\{0,1\}$/\1/")
+				uci -q set vpn-checker.$current.$key="$val"
+			;;
+			list\ *)
+				[ -z "$current" ] && { IFS="
+"; continue; }
+				lkey=$(echo "$line" | sed "s/^list \([a-z_]*\).*/\1/")
+				lval=$(echo "$line" | sed "s/^list [a-z_]* ['\"]\{0,1\}\(.*\)['\"]\{0,1\}$/\1/")
+				uci -q add_list vpn-checker.$current.$lkey="$lval"
+			;;
+		esac
+		IFS="
+"
+	done
+	IFS="$OLDIFS"
+	uci commit vpn-checker
+
+	json_init
+	json_add_string status "ok"
+	json_add_int imported "$imported"
+	json_dump
+}
+
+do_check_url_available() {
+	local url="$1"
+	[ -n "$url" ] || { echo '{"ok":false,"error":"empty"}'; return; }
+	case "$url" in
+		http://*|https://*) ;;
+		*) echo '{"ok":false,"error":"invalid_scheme"}'; return ;;
+	esac
+
+	local start_ms end_ms ms code
+	start_ms=$(date +%s%3N 2>/dev/null)
+	case "$start_ms" in *N*|'') start_ms=$(( $(date +%s) * 1000 )) ;; esac
+
+	if wget -q --spider --timeout=8 --tries=1 "$url" 2>/dev/null; then
+		code=200
+	else
+		if wget -q -O /dev/null --timeout=8 --tries=1 "$url" 2>/dev/null; then
+			code=200
+		else
+			code=$(wget -S -O /dev/null --timeout=8 --tries=1 "$url" 2>&1 | awk '/^  HTTP\// {c=$2} END {print c+0}')
+			[ -z "$code" ] && code=0
+		fi
+	fi
+
+	end_ms=$(date +%s%3N 2>/dev/null)
+	case "$end_ms" in *N*|'') end_ms=$(( $(date +%s) * 1000 )) ;; esac
+	ms=$(( end_ms - start_ms ))
+	[ "$ms" -lt 0 ] && ms=0
+
+	json_init
+	if [ "$code" -ge 200 ] && [ "$code" -lt 400 ]; then
+		json_add_boolean ok 1
+	else
+		json_add_boolean ok 0
+	fi
+	json_add_int code "$code"
+	json_add_int ms "$ms"
+	json_dump
+}
+
+case "$1" in
+list)
+	cat <<'JSON'
+{
+	"get_groups": {},
+	"get_group": { "cfg": "str" },
+	"save_group": { "payload": "str" },
+	"delete_group": { "cfg": "str" },
+	"get_binary_status": {},
+	"check_binary_update": {},
+	"remove_binary": {},
+	"download_binary": {},
+	"service_action": { "action": "str" },
+	"get_service_status": {},
+	"get_compat": {},
+	"get_cpu_load": {},
+	"get_stats": {},
+	"get_log": { "lines": "str", "file": "str" },
+	"clear_log": {},
+	"toggle_group": { "cfg": "str", "enabled": "str" },
+	"force_check": { "cfg": "str" },
+	"force_check_all": {},
+	"import_config": { "content": "str" },
+	"check_url_available": { "url": "str" }
+}
+JSON
+;;
+call)
+	case "$2" in
+		get_groups)   do_get_groups ;;
+		get_group)
+			read -r input
+			cfg=$(echo "$input" | jsonfilter -e '@.cfg' 2>/dev/null)
+			do_get_group "$cfg"
+		;;
+		save_group)
+			read -r input
+			do_save_group "$input"
+		;;
+		delete_group)
+			read -r input
+			cfg=$(echo "$input" | jsonfilter -e '@.cfg' 2>/dev/null)
+			do_delete_group "$cfg"
+		;;
+		get_binary_status)  do_get_binary_status ;;
+		check_binary_update) do_check_binary_update ;;
+		remove_binary)      do_remove_binary ;;
+		download_binary)    do_download_binary ;;
+		service_action)
+			read -r input
+			action=$(echo "$input" | jsonfilter -e '@.action' 2>/dev/null)
+			do_service_action "$action"
+		;;
+		get_service_status) do_get_service_status ;;
+		get_compat)         do_get_compat ;;
+		get_cpu_load)       do_get_cpu_load ;;
+		get_stats)          do_get_stats ;;
+		get_log)
+			read -r input
+			lines=$(echo "$input" | jsonfilter -e '@.lines' 2>/dev/null)
+			which=$(echo "$input" | jsonfilter -e '@.file' 2>/dev/null)
+			do_get_log "$lines" "$which"
+		;;
+		clear_log)          do_clear_log ;;
+		toggle_group)
+			read -r input
+			cfg=$(echo "$input" | jsonfilter -e '@.cfg' 2>/dev/null)
+			enabled=$(echo "$input" | jsonfilter -e '@.enabled' 2>/dev/null)
+			do_toggle_group "$cfg" "$enabled"
+		;;
+		force_check)
+			read -r input
+			cfg=$(echo "$input" | jsonfilter -e '@.cfg' 2>/dev/null)
+			do_force_check "$cfg"
+		;;
+		force_check_all)    do_force_check_all ;;
+		import_config)
+			read -r input
+			content=$(echo "$input" | jsonfilter -e '@.content' 2>/dev/null)
+			do_import_config "$content"
+		;;
+		check_url_available)
+			read -r input
+			url=$(echo "$input" | jsonfilter -e '@.url' 2>/dev/null)
+			do_check_url_available "$url"
+		;;
+		*) echo '{"error":"unknown method"}' ;;
+	esac
+;;
+esac
