@@ -44,7 +44,7 @@ echo "Найден пакет: $LATEST_URL"
 # 4. Скачиваем
 TMP_PKG="/tmp/${PKG_NAME}.${EXT}"
 echo "Скачивание..."
-if ! wget -qO "$TMP_PKG" "$LATEST_URL"; then
+if ! curl -fsSL -o "$TMP_PKG" "$LATEST_URL"; then
     echo "Ошибка при скачивании."
     exit 1
 fi
