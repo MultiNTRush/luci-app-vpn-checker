@@ -3,29 +3,29 @@ name: Build OpenWrt IPK
 on:
   push:
     tags:
-      - 'v*' # Сборка запускается при создании тега версии, например v1.0.0
-  workflow_dispatch: # Также можно запускать вручную из интерфейса GitHub
+      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build:
     strategy:
       matrix:
-        # Укажите нужные архитектуры и версии OpenWrt
         include:
-          - arch: aarch64_cortex-a53
-            target: mediatek-filogic
+          - arch: x86_64
+            target: x86-64
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container:
       image: openwrt/sdk:${{ matrix.target }}-24.10.8
+      options: --user root
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Prepare SDK and Package
         run: |
-          cp -r $GITHUB_WORKSPACE /builder/package/myapp
+          cp -r $GITHUB_WORKSPACE /builder/package/luci-app-vpn-checker
           cd /builder
           ./scripts/feeds update -a
           ./scripts/feeds install -a
@@ -34,10 +34,16 @@ jobs:
       - name: Compile IPK
         run: |
           cd /builder
-          make package/myapp/compile V=s
+          make package/luci-app-vpn-checker/compile V=s
 
       - name: Upload IPK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: myapp-${{ matrix.arch }}
+          name: luci-app-vpn-checker-${{ matrix.arch }}
           path: /builder/bin/packages/*/base/luci-app-vpn-checker_*.ipk
+
+      - name: Upload IPK to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: /builder/bin/packages/*/base/luci-app-vpn-checker_*.ipk
