@@ -17,11 +17,12 @@ fi
 
 echo "Обнаружен менеджер пакетов: $PKG_MGR (формат .$EXT)"
 
-# 2. Ищем ссылку на нужный файл в последнем релизе на GitHub
-LATEST_URL=$(wget -qO- "https://github.com" | \
-    grep "browser_download_url" | \
-    grep "\.${EXT}\"" | \
-    cut -d '"' -f 4 | head -n 1)
+# 2. Получаем ссылку на файл из последнего релиза
+API_DATA=$(wget -qO- "https://github.com")
+
+LATEST_URL=$(echo "$API_DATA" | \
+    grep -o "https://github.com[^\"]*\.${EXT}" | \
+    head -n 1)
 
 if [ -z "$LATEST_URL" ]; then
     echo "Ошибка: файл .$EXT не найден в последнем релизе."
@@ -33,7 +34,7 @@ TMP_PKG="/tmp/${PKG_NAME}.${EXT}"
 echo "Скачивание $LATEST_URL..."
 wget -qO "$TMP_PKG" "$LATEST_URL"
 
-if [ $? -ne 0 ]; then
+if [ $? -ne 0 ] || [ ! -s "$TMP_PKG" ]; then
     echo "Ошибка при скачивании файла."
     exit 1
 fi
