@@ -1,0 +1,47 @@
+name: Build OpenWrt IPK
+
+on:
+  push:
+    tags:
+      - 'v*' # Сборка запускается при создании тега версии, например v1.0.0
+  workflow_dispatch: # Также можно запускать вручную из интерфейса GitHub
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        # Укажите нужные архитектуры и версии OpenWrt
+        include:
+          - arch: x86_64
+            target: x86/64
+          - arch: aarch64_cortex-a53
+            target: mediatek/filogic
+          - arch: mipsel_24kc
+            target: ramips/mt7621
+
+    runs-on: ubuntu-latest
+    container:
+      image: openwrt/sdk:${{ matrix.target }}-23.05.5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare SDK and Package
+        run: |
+          cp -r $GITHUB_WORKSPACE /builder/package/myapp
+          cd /builder
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
+
+      - name: Compile IPK
+        run: |
+          cd /builder
+          make package/myapp/compile V=s
+
+      - name: Upload IPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: myapp-${{ matrix.arch }}
+          path: /builder/bin/packages/*/base/luci-app-vpn-checker_*.ipk
