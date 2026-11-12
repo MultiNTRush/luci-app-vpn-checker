@@ -17,10 +17,10 @@ sh <(wget -O - https://raw.githubusercontent.com/MultiNTRush/luci-app-vpn-checke
 ```
 
 ### Если возникает ошибка скачивания по HTTPS
-На некоторых сборках OpenWrt 23.05 / 24.10 в системе отсутствуют сертификаты для работы `wget` с `https://`. В этом случае выполните команду:
+На некоторых сборках OpenWrt 24.10+ и ниже в системе отсутствуют сертификаты для работы `wget` с `https://`. В этом случае выполните команду:
 
 ```sh
-opkg update && opkg install ca-bundle libustream-mbedtls && wget -O - https://githubusercontent.com | sh
+opkg update && opkg install ca-bundle libustream-mbedtls && sh <(wget -O - https://raw.githubusercontent.com/MultiNTRush/luci-app-vpn-checker/main/install.sh)
 ```
 
 После завершения установки обновите страницу веб-интерфейса LuCI в браузере (или перезайдите в панель управления), чтобы новый раздел появился в меню.
