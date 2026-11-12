@@ -12,16 +12,12 @@ jobs:
       matrix:
         # Укажите нужные архитектуры и версии OpenWrt
         include:
-          - arch: x86_64
-            target: x86/64
           - arch: aarch64_cortex-a53
             target: mediatek/filogic
-          - arch: mipsel_24kc
-            target: ramips/mt7621
 
     runs-on: ubuntu-latest
     container:
-      image: openwrt/sdk:${{ matrix.target }}-23.05.5
+      image: openwrt/sdk:${{ matrix.target }}-24.10.8
 
     steps:
       - name: Checkout repository
